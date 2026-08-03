@@ -1,0 +1,42 @@
+# PubMedQA FULL run (Step D1) — the real experiment, PubMedQA-centred.
+# 200 questions x 3 arms x 3 samples at a fixed corpus size = 1800 generations.
+# Only launch after the D0 verification run (config/pubmedqa_verify.yaml) is green.
+#
+# Run WITHOUT --no-sweep so the fixed kb_size is applied:
+#   python scripts/run_experiment.py --config config/pubmedqa_run.yaml
+#
+# Runtime budget: Full-Context at ~100 sections is ~40 s/call; No-Context/RAG ~2.5 s. At N=200,
+# 3 samples that is ~600 Full-Context calls => ~6-8 h wall-clock (plan for an overnight run).
+seed: 42
+
+generator:
+  model: "gemini/gemini-3.5-flash-lite"   # 3.5-flash (non-lite) was Google-side capacity-throttled
+  temperature: 0.2          # low but > 0 so the 3 samples capture variance
+  max_tokens: 2048          # thinking model: budget must cover hidden reasoning + the visible
+                            # answer. At 512 the reasoning ate the budget and chopped the answer.
+  n_samples: 3
+
+judge:
+  model: "anthropic/claude-sonnet-5"
+  temperature: 0.0
+  max_tokens: 512
+
+embedding:
+  model: "sentence-transformers/all-MiniLM-L6-v2"   # general model kept by design decision
+
+retrieval:
+  k: 4
+  chunk_level: "paragraph"
+
+# Fixed corpus size (single-element list, run WITHOUT --no-sweep) — see pubmedqa_verify.yaml for
+# why native/--no-sweep is unsafe at this N. Full-Context and RAG deliberately see different text
+# volumes here (100 vs k=4), which is the intended efficiency/quality tradeoff under study.
+kb_size_sweep: [100]
+
+experiment:
+  dataset: "pubmedqa"
+  n_questions: 200          # ~22 'maybe' at pqa_labeled's ~11% base rate; report as a limitation
+  arms: ["no_context", "full_context", "rag"]
+
+paths:
+  results_dir: "results"

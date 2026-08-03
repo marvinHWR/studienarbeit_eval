@@ -1,0 +1,26 @@
+# Secrets — never commit
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Experiment outputs (parquet, Excel reports, figures)
+results/
+
+# Local working notes / tooling — the repo ships code + README only
+*.md
+!README.md
+.claude/
+
+# Out of scope for this repo (PubMedQA-only experiment), kept locally:
+# other-dataset loaders and the scripts/configs that only drive them.
+src/sae/data/hotpotqa.py
+src/sae/data/musique.py
+scripts/run_spike.py
+scripts/validate_judge.py
+config/smoke_test.yaml

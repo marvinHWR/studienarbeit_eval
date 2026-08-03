@@ -1,0 +1,43 @@
+# Central experiment configuration.
+# Models are provider-agnostic litellm identifiers (e.g. "openai/gpt-4o-mini",
+# "anthropic/claude-sonnet-5", "ollama/llama3.1"). Pick concrete pinned versions
+# before the full run. HARD RULE: judge.model must differ from generator.model.
+
+seed: 42
+
+# API keys live in .env (loaded automatically), NOT here. See .env.example.
+generator:
+  model: "gemini/gemini-3.5-flash-lite"   # 3.5-flash (non-lite) was Google-side capacity-throttled
+  temperature: 0.2          # low but > 0 so N samples capture variance
+  max_tokens: 2048          # Gemini flash can emit hidden reasoning tokens counted against
+                            # max_tokens; 2048 leaves room for reasoning + the full visible
+                            # answer (512 truncated 3.5-flash mid-sentence).
+  n_samples: 3              # generations per question for variance estimates
+
+judge:
+  model: "anthropic/claude-sonnet-5"
+  temperature: 0.0          # deterministic judging
+  max_tokens: 512
+  strict_faithfulness: false  # skip the extra per-arm faithfulness_retrieved pass on the full
+                              # run to save judge cost; backfill later via scripts/rescore.py
+
+embedding:
+  model: "sentence-transformers/all-MiniLM-L6-v2"
+
+retrieval:
+  k: 4                       # top-k chunks for the RAG arm
+  chunk_level: "paragraph"   # "paragraph" | "sentence"
+
+# KB-size sweep: number of paragraphs presented per question (distractors + padding).
+# PubMedQA design: a single fixed point at 120 = the native shared pool (pool_size), i.e. no
+# trimming — the corpus is used exactly as constructed. Single point, so the H3/H4 KB-size
+# tests don't apply here. (For a HotpotQA/MuSiQue sweep run, restore e.g. [2, 4, 6, 10].)
+kb_size_sweep: [120]
+
+experiment:
+  dataset: "pubmedqa"        # "hotpotqa" | "musique" | "pubmedqa"
+  n_questions: 200           # target 150-300 for paired-test power
+  arms: ["no_context", "full_context", "rag"]
+
+paths:
+  results_dir: "results"

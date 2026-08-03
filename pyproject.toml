@@ -1,0 +1,41 @@
+[project]
+name = "sae"
+version = "0.1.0"
+description = "Studienarbeit eval harness: No-Context vs. Full-Context-Stuffing vs. RAG"
+requires-python = ">=3.10"
+dependencies = [
+    "datasets>=2.19",
+    "ragas>=0.2,<0.3",       # ragas_eval.py targets the 0.2.x evaluate() API
+    # ragas 0.2.x imports langchain_community.chat_models.vertexai, removed in the
+    # langchain 1.x line — pin the langchain stack to the compatible 0.3.x releases.
+    "langchain-core>=0.3,<0.4",
+    "langchain-community>=0.3,<0.4",
+    "langchain-openai>=0.2,<0.3",
+    "langchain-huggingface>=0.1,<0.2",
+    "faiss-cpu>=1.8",
+    "sentence-transformers>=3.0",
+    "litellm>=1.40",          # provider-agnostic LLM client (generator != judge)
+    "python-dotenv>=1.0",     # load API keys from .env into the environment for litellm
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5", "ipykernel>=6.29"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sae"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

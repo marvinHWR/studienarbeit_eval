@@ -1,0 +1,40 @@
+# PubMedQA VERIFICATION run (Step D0 gate) — mirrors the full run but tiny.
+# Purpose: confirm the label-leading prompt, the new label metrics (macro-F1 / per-class recall /
+# abstention), the new parquet+Excel columns, and Full-Context tractability at the real kb_size —
+# BEFORE paying for the full run. 15 questions x 3 arms x 1 sample = 45 rows.
+#
+# Run it WITHOUT --no-sweep so the fixed kb_size below is applied (see kb_size_sweep note):
+#   python scripts/run_experiment.py --config config/pubmedqa_verify.yaml
+seed: 42
+
+generator:
+  model: "gemini/gemini-3.5-flash-lite"   # 3.5-flash (non-lite) was Google-side capacity-throttled
+  temperature: 0.2
+  max_tokens: 2048          # room for any hidden reasoning tokens + the full visible answer
+  n_samples: 1
+
+judge:
+  model: "anthropic/claude-sonnet-5"
+  temperature: 0.0
+  max_tokens: 512
+
+embedding:
+  model: "sentence-transformers/all-MiniLM-L6-v2"
+
+retrieval:
+  k: 4
+  chunk_level: "paragraph"
+
+# Fixed corpus size (single-element list, run WITHOUT --no-sweep). PubMedQA's pool grows with N
+# (each question's gold sections are pooled), so --no-sweep/native size would blow up Full-Context
+# at large N. A fixed kb_size resizes every question to a constant corpus (gold preserved), keeping
+# Full-Context comparable and tractable. Mirror the full run's value here.
+kb_size_sweep: [100]
+
+experiment:
+  dataset: "pubmedqa"
+  n_questions: 15
+  arms: ["no_context", "full_context", "rag"]
+
+paths:
+  results_dir: "results"
