@@ -21,7 +21,7 @@ from sae.metrics.accuracy import (
 )
 from sae.metrics.deterministic import exact_match, token_f1
 from sae.metrics.retrieval_diag import context_precision, context_recall
-from sae.stats import compare_arms, holm_adjust, slope, trend_test
+from sae.stats import bonferroni_adjust, mcnemar_exact, paired_t
 
 
 def test_exact_match_normalization():
@@ -134,52 +134,61 @@ def test_resize_kb_locates_gold_with_duplicate_texts():
     assert small.paragraphs[small.gold_para_idx[0]] == "gold"
 
 
-def test_compare_arms_drops_nan_pairs():
+def test_mcnemar_counts_only_discordant_pairs():
+    # Concordant questions (both right / both wrong) carry no information; only b and c do.
+    a = np.array([True, True, True, False, False, True, False])
+    b = np.array([True, False, False, True, False, True, False])
+    res = mcnemar_exact(a, b, metric="label_acc", arm_a="rag", arm_b="no_context")
+    assert res.n_pairs == 7
+    assert (res.b, res.c) == (2, 1)          # 2x only A right, 1x only B right
+    assert res.n_discordant == 3
+
+
+def test_mcnemar_symmetric_gives_p_one():
+    # The thesis' H3 case in miniature: the arms disagree, but symmetrically -> no evidence.
+    a = np.array([True] * 21 + [False] * 21)
+    b = ~a
+    res = mcnemar_exact(a, b, metric="label_acc", arm_a="full_context", arm_b="rag")
+    assert res.b == res.c == 21
+    assert res.p_value == pytest.approx(1.0)
+    # Arms that never disagree are also p = 1.0, not a division by zero.
+    same = mcnemar_exact(a, a, metric="label_acc", arm_a="x", arm_b="y")
+    assert same.n_discordant == 0 and same.p_value == 1.0
+
+
+def test_mcnemar_detects_asymmetry():
+    a = np.array([True] * 20 + [False] * 2)     # 20 only-A vs. 2 only-B
+    b = ~a
+    res = mcnemar_exact(a, b, metric="label_acc", arm_a="rag", arm_b="no_context")
+    assert res.p_value < 0.001
+
+
+def test_paired_t_drops_nan_pairs():
     a = np.array([0.9, 0.8, np.nan, 0.7, 0.6])
-    b = np.array([0.5, 0.4, 0.9, np.nan, 0.2])           # two pairs contain a NaN
-    res = compare_arms(a, b, metric="f1", arm_a="rag", arm_b="no_context")
-    assert res.n == 3                                    # post-drop count, not 5
+    b = np.array([0.5, 0.3, 0.9, np.nan, 0.2])           # two pairs contain a NaN
+    res = paired_t(a, b, metric="faithfulness", arm_a="rag", arm_b="no_context")
+    assert res.n == 3 and res.df == 2                    # post-drop count, not 5
     assert not np.isnan(res.p_value)
     assert not np.isnan(res.statistic)
 
 
-def test_paired_stats_detects_difference():
+def test_paired_t_detects_difference():
     rng = np.random.default_rng(0)
     a = rng.uniform(0.6, 1.0, 40)
     b = a - rng.uniform(0.1, 0.3, 40)           # a strictly better
-    res = compare_arms(a, b, metric="f1", arm_a="rag", arm_b="no_context")
+    res = paired_t(a, b, metric="faithfulness", arm_a="rag", arm_b="no_context")
     assert res.p_value < 0.05
-    assert res.effect_size > 0
-    assert res.ci_low > 0                        # CI on (a-b) excludes 0
+    assert res.statistic > 0
+    assert res.mean_a > res.mean_b
 
 
-def test_slope_recovers_linear_trend():
-    assert slope(np.array([2, 4, 6, 10]), np.array([1, 2, 3, 5])) == pytest.approx(0.5)
-    assert slope(np.array([4, 4, 4]), np.array([1, 2, 3])) == 0.0   # constant x -> no trend
-
-
-def test_trend_test_detects_positive_slope():
-    # Per-question slopes all clearly > 0 -> H3 trend is significant and CI excludes 0.
-    rng = np.random.default_rng(0)
-    slopes = rng.uniform(0.2, 0.8, 30)
-    res = trend_test(slopes, metric="prompt_tokens", arm="full_context")
-    assert res.n == 30
-    assert res.p_value < 0.05
-    assert res.median_slope > 0
-    assert res.ci_low > 0
-    # A flat arm (slopes ~ 0) must NOT register a trend.
-    flat = trend_test(np.zeros(30), metric="prompt_tokens", arm="no_context")
-    assert flat.p_value == 1.0
-    assert flat.median_slope == 0.0
-
-
-def test_holm_adjust_monotone_and_bounded():
-    p = np.array([0.01, 0.04, 0.03])
-    adj = holm_adjust(p)
+def test_bonferroni_adjust_bounded():
+    p = np.array([0.01, 0.04, 0.30])
+    adj = bonferroni_adjust(p)
     assert np.all(adj >= p)          # adjustment never lowers a p-value
     assert np.all(adj <= 1.0)
-    # smallest raw p (0.01) scaled by family size 3 -> 0.03
-    assert adj[0] == pytest.approx(0.03)
+    assert adj[0] == pytest.approx(0.03)     # 0.01 x family size 3
+    assert adj[2] == pytest.approx(0.90)
 
 
 def test_config_rejects_same_judge_and_generator(tmp_path):

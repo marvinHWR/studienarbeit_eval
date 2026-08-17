@@ -7,7 +7,7 @@ the CSVs `analyze.py` wrote, plus the descriptive means from the run Parquet, so
 stays the single source of truth. Run it after `analyze.py`; it makes no API calls.
 
 Sheets: overview (setup + headline findings) / mean_by_arm / label_metrics (incl. majority
-baseline) / paired_stats (Wilcoxon + Holm) / efficiency.
+baseline) / konfirmatorische_tests (McNemar + t-Test, Bonferroni) / efficiency.
 
 Usage:  python scripts/export_analysis.py --run results/run_pubmedqa.parquet
 """
@@ -30,16 +30,18 @@ MEAN_COLS = [
     "answer_correctness", "ctx_precision", "ctx_recall",
     "prompt_tokens", "completion_tokens", "ttft_s", "total_latency_s",
 ]
-# Column order for the paired-stats sheet: what was compared -> how big -> how certain.
-STATS_COLS = ["metric", "arm_a", "arm_b", "n", "median_a", "median_b", "effect_size",
-              "ci_low", "ci_high", "statistic", "p_value", "p_holm"]
+# Column order for the confirmatory-test sheet: which hypothesis -> what was compared -> how
+# certain. b/c/n_discordant are the McNemar four-fold cells; statistic/df belong to the t-test.
+STATS_COLS = ["test_id", "hypothesis", "metric", "arm_a", "arm_b", "method", "n",
+              "b_only_a", "c_only_b", "n_discordant", "statistic", "df",
+              "p_value", "p_bonferroni"]
 
-_P_COLS = {"p_value", "p_holm"}
-_INT_COLS = {"n", "n_questions", "n_rows"}
+_P_COLS = {"p_value", "p_bonferroni"}
+_INT_COLS = {"n", "n_questions", "n_rows", "b_only_a", "c_only_b", "n_discordant", "df"}
 _NUMBER_FORMAT = "0.0000"
 _P_FORMAT = "0.00E+00"
 _HEADER_FILL = PatternFill("solid", fgColor="DDEBF7")
-_SIG_FILL = PatternFill("solid", fgColor="C6EFCE")     # Holm-significant comparison
+_SIG_FILL = PatternFill("solid", fgColor="C6EFCE")     # Bonferroni-significant comparison
 _NOTE_FILL = PatternFill("solid", fgColor="FFF2CC")    # baseline / annotation row
 _BOLD = Font(bold=True)
 
@@ -75,8 +77,8 @@ def _overview_rows(df: pd.DataFrame, run: Path, gold: pd.Series,
     by_arm = label_tbl.set_index("arm")
     fc, rg, nc = by_arm.loc["full_context"], by_arm.loc["rag"], by_arm.loc["no_context"]
     ptok = df.groupby("arm")["prompt_tokens"].mean()
-    acc_fc_rag = stats[(stats["metric"] == "label_acc") & (stats["arm_a"] == "full_context")
-                       & (stats["arm_b"] == "rag")].iloc[0]
+    t1 = stats[stats["test_id"] == "T1"].iloc[0]      # H1: label_acc, RAG vs. No-Context
+    t3 = stats[stats["test_id"] == "T3"].iloc[0]      # H3: label_acc, Full-Context vs. RAG
 
     return [
         ("SETUP", None),
@@ -97,10 +99,15 @@ def _overview_rows(df: pd.DataFrame, run: Path, gold: pd.Series,
         ("Majority-Baseline Macro-F1", round(base_f1, 4)),
         (None, None),
         ("KERNAUSSAGEN", None),
+        ("Accuracy RAG vs. No-Context",
+         f"{rg['accuracy']:.3f} vs. {nc['accuracy']:.3f} — McNemar: {int(t1['b_only_a'])} Fragen "
+         f"nur von RAG geloest gegen {int(t1['c_only_b'])} nur von No-Context, "
+         f"p = {t1['p_bonferroni']:.2e} nach Bonferroni (H1)"),
         ("Accuracy RAG vs. Full-Context",
          f"{rg['accuracy']:.3f} vs. {fc['accuracy']:.3f} — kein nachweisbarer Unterschied "
-         f"(p = {acc_fc_rag['p_value']:.2f}, CI [{acc_fc_rag['ci_low']:.3f}, "
-         f"{acc_fc_rag['ci_high']:.3f}])"),
+         f"(McNemar, p = {t3['p_bonferroni']:.2f}; {int(t3['n_discordant'])} abweichende "
+         f"Entscheidungen, davon {int(t3['b_only_a'])} nur Full-Context, "
+         f"{int(t3['c_only_b'])} nur RAG) (H3)"),
         ("Macro-F1 RAG vs. Full-Context",
          f"{rg['macro_f1']:.3f} vs. {fc['macro_f1']:.3f} — RAG besser bei den Minderheitsklassen "
          f"(deskriptiv, nicht gepaart testbar)"),
@@ -115,10 +122,13 @@ def _overview_rows(df: pd.DataFrame, run: Path, gold: pd.Series,
                          "tatsaechlich gesehenen Kontext -> ueberschaetzt RAGs Grounding"),
         ("answer_relevancy", "bei kurzen yes/no/maybe-Antworten laengenabhaengig (Confound) -> "
                              "nur mit Vorbehalt berichten"),
-        ("ctx_precision / ctx_recall", "deterministisch; die Signifikanzen dort bestaetigen die "
-                                       "Konstruktion der Arme, sie sind kein empirischer Befund"),
+        ("ctx_precision / ctx_recall", "deterministisch; die Unterschiede folgen aus der "
+                                       "Konstruktion der Arme und werden ohne Test berichtet"),
         ("em / f1", "strukturell ~0 gegen die freitextliche long_answer -> nicht berichtet"),
-        ("H3 / H4", "entfallen: kb_size hat nur einen Wert (120), kein Sweep"),
+        ("Statistikplan", "je Hypothese genau ein Test (T1/T3 McNemar auf dem Mehrheitsvotum, "
+                          "T2 gepaarter t-Test auf der Faithfulness), Bonferroni ueber die drei; "
+                          "alle uebrigen Messgroessen deskriptiv ohne p-Wert"),
+        ("kb_size-Sweep", "entfaellt: kb_size hat nur einen Wert (120)"),
         ("Judge-Validierung", "bewusst nicht durchgefuehrt (Limitation). Daher tragen nur die "
                               "judge-freien Metriken die Aussagen: label_acc, Macro-F1, Tokens"),
         (None, None),
@@ -156,14 +166,14 @@ def main() -> None:
 
     run = Path(args.run)
     sdir = Path(args.stats_dir)
-    missing = [f for f in ("paired_stats.csv", "label_metrics.csv", "efficiency.csv")
+    missing = [f for f in ("confirmatory_tests.csv", "label_metrics.csv", "efficiency.csv")
                if not (sdir / f).exists()]
     if missing:
         ap.error(f"missing {', '.join(missing)} in {sdir} — run scripts/analyze.py --run {run} first")
 
     out = Path(args.out) if args.out else run.parent / f"analysis_{run.stem.replace('run_', '')}.xlsx"
     df = pd.read_parquet(run)
-    stats = pd.read_csv(sdir / "paired_stats.csv")
+    stats = pd.read_csv(sdir / "confirmatory_tests.csv")
     label_tbl = pd.read_csv(sdir / "label_metrics.csv")
     eff = pd.read_csv(sdir / "efficiency.csv")
     gold = df.groupby("id")["gold_label"].first().str.strip().str.lower()
@@ -191,18 +201,19 @@ def main() -> None:
     eff_out["prompt_tokens_vs_full_context"] = eff_out["prompt_tokens"] / ref
 
     stats_out = stats[[c for c in STATS_COLS if c in stats.columns]].copy()
-    stats_out["signifikant_holm_5pct"] = stats_out["p_holm"].lt(0.05).map({True: "ja", False: "nein"})
+    stats_out["signifikant_bonferroni_5pct"] = (
+        stats_out["p_bonferroni"].lt(0.05).map({True: "ja", False: "nein"}))
 
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         _write_table(writer, "mean_by_arm", means)
         _write_table(writer, "label_metrics", label_out, wide_first_col=32)
-        _write_table(writer, "paired_stats", stats_out, wide_first_col=18)
+        _write_table(writer, "konfirmatorische_tests", stats_out, wide_first_col=18)
         _write_table(writer, "efficiency", eff_out, wide_first_col=16)
         _write_overview(writer, _overview_rows(df, run, gold, label_tbl, stats))
 
-        # Highlight the Holm-significant comparisons and the appended baseline row.
-        ws = writer.sheets["paired_stats"]
-        for i, sig in enumerate(stats_out["signifikant_holm_5pct"], start=2):
+        # Highlight the Bonferroni-significant comparisons and the appended baseline row.
+        ws = writer.sheets["konfirmatorische_tests"]
+        for i, sig in enumerate(stats_out["signifikant_bonferroni_5pct"], start=2):
             if sig == "ja":
                 for j in range(1, len(stats_out.columns) + 1):
                     ws.cell(row=i, column=j).fill = _SIG_FILL
@@ -211,7 +222,7 @@ def main() -> None:
             ws.cell(row=len(label_out) + 1, column=j).fill = _NOTE_FILL
 
     print(f"Analysis workbook -> {out}  (overview, mean_by_arm, label_metrics, "
-          f"paired_stats [{len(stats_out)} Tests], efficiency)")
+          f"konfirmatorische_tests [{len(stats_out)} Tests], efficiency)")
 
 
 if __name__ == "__main__":

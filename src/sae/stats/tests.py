@@ -1,174 +1,108 @@
-"""Predefined statistical plan: paired tests across arms on the same questions.
+"""Predefined statistical plan: one test per hypothesis, Bonferroni-corrected.
 
-Same question answered by every arm -> paired design. Wilcoxon signed-rank (non-parametric,
-no normality assumption), rank-biserial effect size, and bootstrap CIs on the paired mean
-difference. Decided BEFORE running, per the concept plan.
+Same question answered by every arm -> paired design. The plan was decided BEFORE running, per
+the concept plan, and deliberately runs exactly three confirmatory tests:
+
+  T1 (H1)  label accuracy, RAG vs. No-Context        -> exact McNemar
+  T2 (H2)  faithfulness,   RAG vs. No-Context        -> paired t-test
+  T3 (H3)  label accuracy, Full-Context vs. RAG      -> exact McNemar
+
+The test is chosen by the scale of the measure, not by taste: label accuracy is binary per
+question (majority vote of the N samples vs. the gold label), which is exactly what McNemar is
+for — a t-test on 0/1 data would rest on a normality assumption it cannot support. Faithfulness
+is continuous on [0, 1], so the paired t-test applies. Everything else (answer relevancy, the
+retrieval diagnostics, tokens and latency) is reported descriptively, without a p-value: those
+differences are constructional or orders-of-magnitude, and a significance test would add nothing.
+
+Three tests -> Bonferroni (p x 3), the strictest of the common corrections and explainable in one
+sentence. No Wilcoxon, no Holm, no bootstrap CIs, no rank-biserial effect sizes.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.stats import wilcoxon
+from scipy.stats import binom, ttest_rel
 
 
 @dataclass
-class PairedResult:
+class McNemarResult:
     metric: str
     arm_a: str
     arm_b: str
-    n: int
-    median_a: float
-    median_b: float
-    statistic: float
+    n_pairs: int                # questions compared (both arms present)
+    b: int                      # only arm A correct
+    c: int                      # only arm B correct
+    n_discordant: int           # b + c — the only questions the test looks at
     p_value: float
-    effect_size: float          # rank-biserial correlation
-    ci_low: float               # bootstrap CI on mean(a - b)
-    ci_high: float
-
-
-def paired_wilcoxon(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
-    a, b = np.asarray(a, float), np.asarray(b, float)
-    if np.allclose(a, b):
-        return 0.0, 1.0
-    stat, p = wilcoxon(a, b, zero_method="wilcox", alternative="two-sided")
-    return float(stat), float(p)
-
-
-def rank_biserial(a: np.ndarray, b: np.ndarray) -> float:
-    """Matched-pairs rank-biserial effect size for Wilcoxon signed-rank."""
-    d = np.asarray(a, float) - np.asarray(b, float)
-    d = d[d != 0]
-    if d.size == 0:
-        return 0.0
-    ranks = np.argsort(np.argsort(np.abs(d))) + 1
-    r_pos = ranks[d > 0].sum()
-    r_neg = ranks[d < 0].sum()
-    total = r_pos + r_neg
-    return float((r_pos - r_neg) / total)
-
-
-def bootstrap_ci(
-    a: np.ndarray, b: np.ndarray, n_boot: int = 10000, alpha: float = 0.05, seed: int = 42
-) -> tuple[float, float]:
-    a, b = np.asarray(a, float), np.asarray(b, float)
-    diff = a - b
-    rng = np.random.default_rng(seed)
-    n = diff.size
-    means = np.array([rng.choice(diff, n, replace=True).mean() for _ in range(n_boot)])
-    lo, hi = np.quantile(means, [alpha / 2, 1 - alpha / 2])
-    return float(lo), float(hi)
-
-
-def compare_arms(a: np.ndarray, b: np.ndarray, metric: str, arm_a: str, arm_b: str) -> PairedResult:
-    a, b = np.asarray(a, float), np.asarray(b, float)
-
-    # Drop pairs where either arm is NaN (a degenerate answer yields a NaN RAGAS score). Without
-    # this, wilcoxon's default nan_policy='propagate' silently returns a NaN statistic/p-value.
-    # Filtering here means n, medians, effect size, and the CI all reflect the post-drop pairs.
-    mask = ~(np.isnan(a) | np.isnan(b))
-    a, b = a[mask], b[mask]
-    if a.size == 0:
-        return PairedResult(
-            metric=metric, arm_a=arm_a, arm_b=arm_b, n=0,
-            median_a=float("nan"), median_b=float("nan"),
-            statistic=0.0, p_value=1.0, effect_size=0.0,
-            ci_low=float("nan"), ci_high=float("nan"),
-        )
-
-    stat, p = paired_wilcoxon(a, b)
-    lo, hi = bootstrap_ci(a, b)
-    return PairedResult(
-        metric=metric,
-        arm_a=arm_a,
-        arm_b=arm_b,
-        n=a.size,
-        median_a=float(np.median(a)),
-        median_b=float(np.median(b)),
-        statistic=stat,
-        p_value=p,
-        effect_size=rank_biserial(a, b),
-        ci_low=lo,
-        ci_high=hi,
-    )
-
-
-# --- KB-size hypotheses (H3/H4) -----------------------------------------------------------
-# The KB-size sweep measures each question at several corpus sizes, so it is a repeated-measures
-# design along one ordered axis. We summarize each question's response as a single OLS slope of
-# the metric over kb_size, then test those per-question slopes with the same paired, non-parametric
-# machinery used everywhere else:
-#   H3 (within-arm trend)      -> one-sample Wilcoxon on the slopes vs. 0        (trend_test)
-#   H4 (arm x kb-size interact) -> paired Wilcoxon on slope differences (compare_arms on slopes)
 
 
 @dataclass
-class TrendResult:
+class PairedTResult:
     metric: str
-    arm: str
-    n: int
-    median_slope: float         # median per-question slope of metric over kb_size
-    statistic: float
+    arm_a: str
+    arm_b: str
+    n: int                      # pairs after dropping NaN
+    mean_a: float
+    mean_b: float
+    statistic: float            # t
+    df: int                     # n - 1
     p_value: float
-    effect_size: float          # rank-biserial of slopes vs 0
-    ci_low: float               # bootstrap CI on the mean slope
-    ci_high: float
 
 
-def slope(x: np.ndarray, y: np.ndarray) -> float:
-    """Ordinary-least-squares slope of y on x: metric change per unit of KB size.
+def mcnemar_exact(
+    a_correct: np.ndarray, b_correct: np.ndarray, metric: str, arm_a: str, arm_b: str
+) -> McNemarResult:
+    """Exact (binomial) McNemar test on two paired boolean correctness vectors.
 
-    beta = sum((x - x_bar)(y - y_bar)) / sum((x - x_bar)^2). Returns 0.0 when x is constant
-    (a single distinct KB size carries no trend information).
+    Only the discordant questions carry information: b = "A right, B wrong", c = the reverse.
+    Under H0 each discordant question is a fair coin, so the two-sided exact p-value is
+    2 * P(X <= min(b, c)) with X ~ Binomial(b + c, 0.5), capped at 1. The exact form (rather than
+    the chi-square approximation) is used because it stays valid for small discordant counts —
+    T3 has only 42 of them. b + c == 0 means the arms never disagree -> p = 1.0.
     """
-    x, y = np.asarray(x, float), np.asarray(y, float)
-    xc = x - x.mean()
-    denom = float((xc ** 2).sum())
-    if denom == 0.0:
-        return 0.0
-    return float((xc * (y - y.mean())).sum() / denom)
-
-
-def trend_test(slopes: np.ndarray, metric: str, arm: str) -> TrendResult:
-    """H3: do the per-question slopes over KB size differ systematically from zero?
-
-    One-sample Wilcoxon signed-rank on the slopes (paired against a zero vector), reusing the
-    shared Wilcoxon / rank-biserial / bootstrap helpers. NaN slopes are dropped and `n` reports
-    the post-drop count.
-    """
-    a = np.asarray(slopes, float)
-    a = a[~np.isnan(a)]
-    if a.size == 0:
-        return TrendResult(
-            metric=metric, arm=arm, n=0, median_slope=float("nan"),
-            statistic=0.0, p_value=1.0, effect_size=0.0,
-            ci_low=float("nan"), ci_high=float("nan"),
-        )
-    zero = np.zeros_like(a)
-    stat, p = paired_wilcoxon(a, zero)
-    lo, hi = bootstrap_ci(a, zero)
-    return TrendResult(
-        metric=metric, arm=arm, n=a.size, median_slope=float(np.median(a)),
-        statistic=stat, p_value=p, effect_size=rank_biserial(a, zero),
-        ci_low=lo, ci_high=hi,
+    a = np.asarray(a_correct, bool)
+    b_arr = np.asarray(b_correct, bool)
+    b = int(np.sum(a & ~b_arr))
+    c = int(np.sum(~a & b_arr))
+    n_disc = b + c
+    p = 1.0 if n_disc == 0 else min(1.0, 2.0 * float(binom.cdf(min(b, c), n_disc, 0.5)))
+    return McNemarResult(
+        metric=metric, arm_a=arm_a, arm_b=arm_b, n_pairs=int(a.size),
+        b=b, c=c, n_discordant=n_disc, p_value=p,
     )
 
 
-def holm_adjust(pvalues: np.ndarray) -> np.ndarray:
-    """Holm-Bonferroni step-down adjusted p-values (controls the family-wise error rate).
+def paired_t(a: np.ndarray, b: np.ndarray, metric: str, arm_a: str, arm_b: str) -> PairedTResult:
+    """Paired t-test on two per-question metric vectors (same questions, same order).
 
-    Sort p ascending; the k-th smallest is scaled by (m - k) and the running maximum is carried
-    forward so adjusted values stay monotone. Adjusted p is capped at 1.0 and returned in the
-    original order. Use when a table of tests forms one confirmatory family.
+    Pairs where either arm is NaN are dropped first — a degenerate answer yields a NaN RAGAS
+    score, and ttest_rel would otherwise propagate it into the statistic. `n`, the means and the
+    degrees of freedom all reflect the post-drop pairs (faithfulness: 197 of 200).
+    """
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    mask = ~(np.isnan(a) | np.isnan(b))
+    a, b = a[mask], b[mask]
+    if a.size < 2:
+        return PairedTResult(
+            metric=metric, arm_a=arm_a, arm_b=arm_b, n=int(a.size),
+            mean_a=float("nan"), mean_b=float("nan"),
+            statistic=float("nan"), df=max(int(a.size) - 1, 0), p_value=1.0,
+        )
+    t, p = ttest_rel(a, b)
+    return PairedTResult(
+        metric=metric, arm_a=arm_a, arm_b=arm_b, n=int(a.size),
+        mean_a=float(a.mean()), mean_b=float(b.mean()),
+        statistic=float(t), df=int(a.size) - 1, p_value=float(p),
+    )
+
+
+def bonferroni_adjust(pvalues: np.ndarray) -> np.ndarray:
+    """Bonferroni-adjusted p-values: multiply by the family size, cap at 1.0.
+
+    Controls the family-wise error rate over the confirmatory family (here: three tests).
     """
     p = np.asarray(pvalues, float)
-    m = p.size
-    if m == 0:
+    if p.size == 0:
         return p
-    order = np.argsort(p)
-    adj = np.empty(m, float)
-    running = 0.0
-    for rank, idx in enumerate(order):
-        running = max(running, (m - rank) * float(p[idx]))
-        adj[idx] = min(running, 1.0)
-    return adj
+    return np.minimum(p * p.size, 1.0)
